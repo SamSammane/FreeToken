@@ -72,6 +72,15 @@ ft serve --model ... --gpu GPU-9e8d7c6b  # the same card by UUID (a unique prefi
 | `--page-size` | 1 | KV page size; DSV4 forces 128, the TRTLLM backend needs 16/32/64, SWA models require 1 |
 | `--cache-type` | radix | `radix` (prefix reuse; SWA/GDN-aware variants picked automatically) or `naive` |
 | `--attention-backend`, `--attn` | auto | `trtllm`/`fi`/`fa`/`triton`/`dsv4_sparse`/`dsa`; `prefill,decode` pair allowed; auto picks per model + GPU |
+| `--kv-cache-dtype` | auto | `fp8_e4m3` halves KV bytes/token (static scale 1.0) → ~2x pages for the same VRAM; plain MHA/GQA models + the `fi` backend only |
+
+### Scheduling & speculation
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--decode-interleave` | 0 (strict prefill priority) | Run one decode batch after every N consecutive prefill batches while decodes wait, so a long chunked prefill can't stall running requests; `1` alternates |
+| `--speculative` | none | `ngram`: prompt-lookup speculative decoding — drafts from each request's own context, verified in one extend forward; greedy requests + plain radix/naive caches; output is bit-identical to plain greedy decode |
+| `--speculative-tokens` | 4 | Max draft tokens per request per verify round |
 
 ### MoE offload
 
@@ -87,6 +96,7 @@ See [models.md](models.md#moe-backends) for what each backend does.
 | `--moe-hybrid-max-fetch` | auto | With `hybrid`: max experts fetched over PCIe per layer per step; rest computed on CPU |
 | `--moe-prefill-hit-d2d` | off | Prefill: copy cache-hit experts device-side, stream only misses (CUDA >= 13) |
 | `--disable-moe-prefill-overlap` | overlap on | Disable the two-buffer prefill copy overlap |
+| `--moe-pin-hot` | 0 (off) | Protect up to this fraction of the expert cache from LRU eviction, tracking persistently hot experts across decode windows |
 
 ### API behaviour
 
