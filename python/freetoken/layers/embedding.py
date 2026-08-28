@@ -104,7 +104,9 @@ class ParallelLMHead(VocabParallelEmbedding):
         ctx = get_global_ctx()
         batch = ctx.batch
         bs = batch.size
-        if batch.is_prefill:
+        if batch.is_prefill and not batch.spec_verify:
+            # spec_verify keeps every extend position: the engine verifies draft tokens
+            # against the argmax at each position (see core.Batch.spec_verify).
             indices = batch.attn_metadata.get_last_indices(bs)
             x = x[indices].contiguous()
             del indices

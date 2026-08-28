@@ -541,6 +541,22 @@ class CacheManager:
             req.cache_handle = SWACacheHandle(m.cached_len, m.node, m.kv_indices)
             self.lock(req.cache_handle)
 
+    def rollback_req(self, req: Req, alloc_len: int) -> None:
+        """Free the pages a speculative verify round allocated past the committed point.
+
+        ``alloc_len`` is the request's device_len when the round's pages were allocated
+        (committed length + draft length); ``req.cached_len`` must already be rewound to
+        the committed KV length. Frees whole pages in (page_ceil(cached_len),
+        page_ceil(alloc_len)] -- every other free path (cache_req's tail included) only
+        reaches page_ceil(cached_len), so without this the rejected draft tail leaks.
+        Plain radix/naive only: second-currency caches cannot roll back page-wise, and
+        the speculative gate excludes them."""
+        assert not (self.is_swa or self.is_hybrid or self.swa_paged)
+        keep = div_ceil(req.cached_len, self.page_size) * self.page_size
+        end = div_ceil(alloc_len, self.page_size) * self.page_size
+        if end > keep:
+            self._free(self.page_table[req.table_idx, keep:end])
+
     def _padded_tail(self, req: Req, start: int) -> torch.Tensor:
         """The request's OWN slice [start, page_ceil(cached_len)) of the page table. A finish
         frees through the page-CEIL bound, not cached_len: allocate_paged allocates (and, when

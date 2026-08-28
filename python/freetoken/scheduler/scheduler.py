@@ -106,6 +106,40 @@ class Scheduler(SchedulerIOMixin):
         self._forward_iter = 0  # global forward counter; drives the SWA proactive-eviction cadence
         # Consecutive prefill batches scheduled while decodes were waiting (--decode-interleave).
         self._consecutive_prefills = 0
+        # Speculative decoding (--speculative ngram): a drafter when enabled AND the model /
+        # backend combination supports it, else None. Verify rounds ride the chunked-prefill
+        # extend machinery, so second-currency caches (SWA window slots, GDN state, DSV4
+        # window pools) are out: their per-position state cannot roll back page-wise. The
+        # offload MoE decode path must also be pure-GPU -- the cpu/hybrid executors' buffers
+        # are sized for one token per running request.
+        self.spec_drafter = None
+        if config.speculative == "ngram":
+            cm = self.cache_manager
+            moe = self.engine.moe_offload_cache
+            unsupported = (
+                cm.is_hybrid or cm.is_swa or cm.swa_paged
+                or self.engine.linear_state_pool is not None
+                or (moe is not None and moe.decode_target != "gpu")
+            )
+            if unsupported:
+                logger.warning_rank0(
+                    "--speculative ngram is unsupported for this model/backend "
+                    "(needs a plain radix/naive KV cache and, with MoE offload, "
+                    "GPU decode); running without speculation."
+                )
+            else:
+                from freetoken.spec import NgramDrafter
+
+                self.spec_drafter = NgramDrafter(
+                    max_tokens=config.speculative_tokens,
+                    min_match=config.speculative_min_match,
+                    max_match=config.speculative_max_match,
+                )
+                logger.info_rank0(
+                    f"speculative decoding: ngram (k={config.speculative_tokens}, "
+                    f"match {config.speculative_min_match}-{config.speculative_max_match}); "
+                    "overlap scheduling disabled"
+                )
         # The launched-but-not-yet-drained batch (overlap): set at the top of each overlap_loop
         # iteration so the abort handler can tell whether a request's forward is still in flight
         # (mark it, defer the free to _process_last_data) or not (free immediately). Stays None
@@ -285,7 +319,10 @@ class Scheduler(SchedulerIOMixin):
         # backend's per-batch SNAPSHOT (staged in prepare_for_replay right before the replay, on
         # the same stream, like the generic out_loc copy_from), not the live slot maps -- so the
         # next batch's allocate_paged cannot corrupt the in-flight graph replay. DSV4 overlaps.
-        if ENV.DISABLE_OVERLAP_SCHEDULING:
+        # Speculative rounds must drain (accept/rollback) before the next batch can be
+        # scheduled -- the next lengths depend on how many drafts were accepted -- so
+        # speculation always runs the non-overlap loop.
+        if ENV.DISABLE_OVERLAP_SCHEDULING or self.spec_drafter is not None:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
                 while True:
@@ -309,6 +346,29 @@ class Scheduler(SchedulerIOMixin):
         copy_done.synchronize()
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
+        if batch.spec_verify:
+            with self.cache_manager.lazy_free_region():
+                self._drain_spec_batch(batch, next_tokens_cpu, reply, new_finished_reqs)
+            self.finished_reqs = new_finished_reqs
+            used, total = self._kv_usage_pages()
+            if reply:
+                mem = self._gpu_mem_bytes()
+                for m in reply:
+                    m.kv_used_pages = used
+                    m.kv_total_pages = total
+                    m.gpu_mem_bytes = mem
+            self.status_reporter.report_batch(
+                batch,
+                running_reqs=len(self.decode_manager.running_reqs),
+                queue_reqs=len(self.prefill_manager.pending_list),
+                kv_used_pages=used,
+                kv_total_pages=total,
+                page_size=self.config.page_size,
+                mamba_slots=None,
+                swa_tokens=None,
+            )
+            self.send_result(reply)
+            return
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
@@ -856,9 +916,152 @@ class Scheduler(SchedulerIOMixin):
             self._consecutive_prefills += 1
         else:
             self._consecutive_prefills = 0
+        if batch.is_decode and self.spec_drafter is not None:
+            self._try_speculate(batch)
         forward_input = self._prepare_batch(batch)
         self._report_prompt_admissions(batch)
         return forward_input
+
+    def _try_speculate(self, batch: Batch) -> None:
+        """Convert a decode batch into a speculative verify round in place, when possible.
+
+        Drafts are proposed per request by prompt lookup, appended to the request's host
+        ids AND its token_pool row, and the batch becomes a prefill-phase extend of
+        [last committed token, draft...] per request with ``spec_verify`` set (multi-
+        position LM head + decode-path MoE + per-position argmax). The drain
+        (_drain_spec_batch) accepts the matching prefix, rolls the rest back, and always
+        commits at least the one token this decode batch would have produced.
+        """
+        reqs = batch.reqs
+        # Greedy-only, and all-or-nothing: one sampled request in the batch would need
+        # real (temperature) sampling, which the argmax verify path cannot provide.
+        if any(not r.sampling_params.is_greedy for r in reqs):
+            return
+        # Multimodal requests keep mm_embeds for cache exclusion; a prefill-phase batch
+        # would re-gather them. Keep such batches on plain decode.
+        if any(r.mm_embeds is not None for r in reqs):
+            return
+        drafts: List[List[int]] = []
+        for req in reqs:
+            # Committed tokens per round <= draft + 1 bonus; cap so we can never commit
+            # past the request's output budget.
+            cap = req.max_device_len - req.device_len - 1
+            drafts.append(self.spec_drafter.propose(req.input_ids, cap) if cap > 0 else [])
+        if not any(drafts):
+            return
+        for req, draft in zip(reqs, drafts):
+            if not draft:
+                continue
+            pos0 = req.device_len  # == len(req.input_ids): first draft position
+            t = torch.tensor(draft, dtype=req.input_ids.dtype)
+            req.append_host(t)
+            self.token_pool[req.table_idx, pos0 : pos0 + len(draft)] = t.to(
+                self.device, non_blocking=True
+            )
+            req.device_len += len(draft)
+        batch.phase = "prefill"
+        batch.spec_verify = True
+        batch.spec_drafts = drafts
+
+    def _drain_spec_batch(
+        self,
+        batch: Batch,
+        next_tokens_cpu: torch.Tensor,
+        reply: List[DetokenizeMsg],
+        new_finished_reqs: Set[Req],
+    ) -> None:
+        """Accept/rollback one speculative verify round (runs inside lazy_free_region).
+
+        ``next_tokens_cpu`` holds the model's argmax at every verified position, request
+        by request in batch order (extend_len == len(draft) + 1 rows each). Per request:
+        commit the longest matching draft prefix plus the model's own next token, rewind
+        the host ids and lengths to the committed point, free the KV pages past it, and
+        emit one DetokenizeMsg per committed token (EOS / stop strings / length checked
+        in commit order, exactly like plain decode)."""
+        from freetoken.spec import verify_greedy
+
+        pool_rows: List[int] = []
+        pool_cols: List[int] = []
+        pool_vals: List[int] = []
+        offset = 0
+        for req, draft in zip(batch.reqs, batch.spec_drafts):
+            rows = len(draft) + 1
+            target = next_tokens_cpu[offset : offset + rows].tolist()
+            offset += rows
+            if req.aborted:
+                # Same contract as the plain drain: the forward is drained, free exactly
+                # once. cached_len (== L + d after complete_one) covers every allocated
+                # page, and the ids match the KV written, so cache_req stays sound.
+                self.decode_manager.remove_req(req)
+                self._free_req_resources(req)
+                new_finished_reqs.add(req)
+                continue
+            committed = verify_greedy(draft, target)
+            # Rewind the host ids to the pre-draft committed length, then re-append the
+            # committed tokens one by one with the plain-decode finish checks.
+            L = req.input_ids.numel() - len(draft)
+            alloc_len = L + len(draft)  # device_len when this round's pages were allocated
+            req.input_ids = req._ids_buf[:L]
+            finished = False
+            finish_reason = None
+            for tok in committed:
+                req.append_host(torch.tensor([tok], dtype=req.input_ids.dtype))
+                hit_length = req.input_ids.numel() >= req.max_device_len
+                hit_eos = (
+                    not req.sampling_params.ignore_eos and tok in self.eos_token_ids
+                )
+                matched_stop = (
+                    self._match_stop_str(req)
+                    if not hit_eos and req.sampling_params.stop_strs
+                    else None
+                )
+                finished = hit_length or hit_eos or matched_stop is not None
+                finish_reason = (
+                    ("stop" if (hit_eos or matched_stop is not None) else "length")
+                    if finished
+                    else None
+                )
+                reply.append(
+                    DetokenizeMsg(
+                        uid=req.uid,
+                        next_token=tok,
+                        finished=finished,
+                        finish_reason=finish_reason,
+                        matched_stop=matched_stop,
+                        stop_strs=req.sampling_params.stop_strs or None,
+                    )
+                )
+                if finished:
+                    break
+            new_len = req.input_ids.numel()
+            req.device_len = new_len
+            req.cached_len = new_len - 1
+            # Free the pages backing the rejected draft tail FIRST: they were allocated
+            # through page_ceil(alloc_len), but every later free path (cache_req on
+            # finish included) only reaches page_ceil(cached_len).
+            self.cache_manager.rollback_req(req, alloc_len)
+            if finished:
+                self.decode_manager.remove_req(req)
+                self._free_req_resources(req)
+                new_finished_reqs.add(req)
+            else:
+                # The last committed token diverged from the draft (or is the bonus), so
+                # the token_pool row holds a stale draft id at its position; fix it for
+                # the next round's extend read.
+                pool_rows.append(req.table_idx)
+                pool_cols.append(new_len - 1)
+                pool_vals.append(int(req.input_ids[-1]))
+                # complete_one may have made the request look budget-exhausted mid-round;
+                # make sure it is back in the decode set.
+                self.decode_manager.filter_reqs([req])
+
+        if pool_rows:
+            self.token_pool[
+                torch.tensor(pool_rows, dtype=torch.int64),
+                torch.tensor(pool_cols, dtype=torch.int64),
+            ] = torch.tensor(pool_vals, dtype=self.token_pool.dtype).to(
+                self.device, non_blocking=True
+            )
 
     def _report_prompt_admissions(self, batch: Batch) -> None:
         """Publish first-prefill accounting only after batch preparation succeeded.
@@ -889,7 +1092,10 @@ class Scheduler(SchedulerIOMixin):
         if self.toolcall_anchor_id is not None and not batch.is_prefill:
             self.cache_manager.snapshot_toolcall_anchor(batch.reqs)
         forward_output = self.engine.forward_batch(batch, sample_args)
-        self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+        if not batch.spec_verify:
+            # Spec verify returns one argmax per verified position (not one token per
+            # request); the drain writes the committed token into the pool instead.
+            self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 

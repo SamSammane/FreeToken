@@ -88,7 +88,7 @@ def test_prompt_admitted_signal_uses_existing_frontend_usage_channel():
 
 
 def test_schedule_reports_admission_only_after_prepare_succeeds():
-    batch = SimpleNamespace(is_prefill=True, prompt_admissions=[(1, 12, 4), (2, 34, 0)])
+    batch = SimpleNamespace(is_prefill=True, is_decode=False, prompt_admissions=[(1, 12, 4), (2, 34, 0)])
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.prefill_budget = 99
     scheduler.config = SimpleNamespace(decode_interleave=0)
@@ -114,7 +114,7 @@ def test_schedule_reports_admission_only_after_prepare_succeeds():
 
 
 def test_prepare_failure_emits_no_prompt_admission():
-    batch = SimpleNamespace(is_prefill=True, prompt_admissions=[(1, 12, 0)])
+    batch = SimpleNamespace(is_prefill=True, is_decode=False, prompt_admissions=[(1, 12, 0)])
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.prefill_budget = 99
     scheduler.config = SimpleNamespace(decode_interleave=0)

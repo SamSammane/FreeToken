@@ -932,8 +932,14 @@ class Engine:
         for req in batch.reqs:
             req.complete_one()
 
-        batch_logits = logits[: batch.size]
-        next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
+        if batch.spec_verify:
+            # Verify round: the LM head kept every extend position, so ``logits`` has one
+            # row per verified position (sum of extend_len over reqs). Speculation is
+            # greedy-only; the scheduler's drain does the accept/rollback host-side.
+            next_tokens_gpu = logits.argmax(dim=-1).to(torch.int32)
+        else:
+            batch_logits = logits[: batch.size]
+            next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)

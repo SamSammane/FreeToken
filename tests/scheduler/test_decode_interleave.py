@@ -48,6 +48,7 @@ def _stub_scheduler(decode_interleave: int, n_chunks: int, with_decode: bool):
         decode_manager=dm,
         prefill_budget=CHUNK,
         config=SimpleNamespace(decode_interleave=decode_interleave),
+        spec_drafter=None,
         _consecutive_prefills=0,
         _prepare_batch=lambda batch: batch,  # pass the batch through as the "forward input"
         _report_prompt_admissions=lambda batch: None,

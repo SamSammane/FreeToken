@@ -23,6 +23,16 @@ class SchedulerConfig(EngineConfig):
     # long / queued chunked prefill can stall running decodes. 0 = strict prefill
     # priority (the historical behavior).
     decode_interleave: int = 0
+    # Speculative decoding: "none" or "ngram" (prompt lookup; see freetoken/spec/ngram.py).
+    # Greedy requests only, plain radix/naive caches only (no SWA / hybrid-GDN / DSV4
+    # window pools), and implies non-overlap scheduling; unsupported combinations
+    # disable it with a warning. Output is bit-identical to plain greedy decoding.
+    speculative: str = "none"
+    # Max draft tokens proposed per request per verify round (--speculative ngram).
+    speculative_tokens: int = 4
+    # N-gram match lengths the drafter tries, longest first.
+    speculative_min_match: int = 2
+    speculative_max_match: int = 4
 
     # networking config
     _unique_suffix: str = field(default_factory=_get_pid_suffix)

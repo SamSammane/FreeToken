@@ -337,6 +337,25 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative",
+        choices=["none", "ngram"],
+        default=ServerArgs.speculative,
+        help=(
+            "Speculative decoding. 'ngram' drafts by prompt lookup over each request's "
+            "own context and verifies with one extend forward per round (greedy "
+            "requests, plain radix/naive caches; output is bit-identical to plain "
+            "greedy decoding). Implies non-overlap scheduling."
+        ),
+    )
+
+    parser.add_argument(
+        "--speculative-tokens",
+        type=_positive_int,
+        default=ServerArgs.speculative_tokens,
+        help="Max draft tokens per request per verify round for --speculative ngram.",
+    )
+
+    parser.add_argument(
         "--decode-interleave",
         type=int,
         default=ServerArgs.decode_interleave,

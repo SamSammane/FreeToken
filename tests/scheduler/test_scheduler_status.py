@@ -26,13 +26,13 @@ def _prefill_batch(new_tokens, cached_tokens, n_seqs):
     # decode state. Live reqs here carry deliberately-wrong values to prove that.
     reqs = [_req(extend=1, cached=10_000) for _ in range(n_seqs)]
     return SimpleNamespace(
-        is_prefill=True, is_decode=False, reqs=reqs,
+        is_prefill=True, is_decode=False, spec_verify=False, reqs=reqs,
         log_new_tokens=new_tokens, log_cached_tokens=cached_tokens,
     )
 
 
 def _decode_batch(n):
-    return SimpleNamespace(is_prefill=False, is_decode=True, reqs=[_req(1, 0) for _ in range(n)])
+    return SimpleNamespace(is_prefill=False, is_decode=True, spec_verify=False, reqs=[_req(1, 0) for _ in range(n)])
 
 
 def test_prefill_line_reports_tokens_and_throughput():
