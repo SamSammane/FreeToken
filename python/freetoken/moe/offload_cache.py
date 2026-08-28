@@ -134,6 +134,13 @@ class OffloadMoeCache:
     # pcie_bw / cpu_bw ratio so the PCIe fetch and the CPU overflow GEMV take equal
     # time (perfect overlap): fetched : cpu = pcie : cpu - pcie.
     hybrid_fetch_fraction: float = 0.0
+    # Hot-expert pinning (--moe-pin-hot): protect up to this fraction of the slot cache
+    # from LRU eviction, chosen by the host-side hotness policy in hot_pin.py. 0 = off.
+    # Purely an eviction-order bias (a captured usage refresh per decode forward); it
+    # never changes residency bookkeeping, so both ensure kernels stay untouched.
+    pin_hot_fraction: float = 0.0
+    # Decode steps between hotness samples (a small D2H readback + mask rebuild each).
+    pin_sample_interval: int = 512
 
     def __post_init__(self) -> None:
         policy_ids = {"lru": 0}
@@ -227,6 +234,19 @@ class OffloadMoeCache:
         self.stat_active_layer = torch.zeros(self.num_layers, dtype=torch.int64, device=self.device)
         self.stat_fetched_layer = torch.zeros(self.num_layers, dtype=torch.int64, device=self.device)
         self.stat_steps_layer = torch.zeros(self.num_layers, dtype=torch.int64, device=self.device)
+        # Hot-expert pinning state. _pin_mask is the persistent buffer the captured
+        # refresh op reads: its CONTENT is swapped by tick_hot_pins outside the graph,
+        # its identity never changes after capture.
+        self.hot_pinner = None
+        self._pin_mask = torch.zeros((self.cache_size,), dtype=torch.bool, device=self.device)
+        self._pin_tick = 0
+        self._pin_refresh_cache: tuple[frozenset, int | None] | None = None
+        if self.pin_hot_fraction > 0:
+            from freetoken.moe.hot_pin import HotExpertPinner
+
+            self.hot_pinner = HotExpertPinner(
+                self.cache_size, self.num_layers, self.num_experts, self.pin_hot_fraction
+            )
         # Opt-in decode routing histogram (per layer, per expert) for cache-skew
         # analysis. Accumulated in ``ensure_experts`` from the raw expert ids before the
         # kernel rewrites them to slots. Only accurate with CUDA graphs disabled (the
@@ -458,6 +478,16 @@ class OffloadMoeCache:
         self.slot_for_id.fill_(-1)
         self.id_of_slot = torch.full((cache_size,), -1, dtype=torch.int32, device=self.device)
         self.usage = torch.zeros((cache_size,), dtype=torch.int64, device=self.device)
+        # cache_size-shaped pin state; safe to swap identity -- the engine re-captures
+        # the decode graphs after a rebuild.
+        self._pin_mask = torch.zeros((cache_size,), dtype=torch.bool, device=self.device)
+        self._pin_tick = 0
+        if self.pin_hot_fraction > 0:
+            from freetoken.moe.hot_pin import HotExpertPinner
+
+            self.hot_pinner = HotExpertPinner(
+                cache_size, self.num_layers, self.num_experts, self.pin_hot_fraction
+            )
         plan_slots = max(self.num_experts, cache_size)
         self.evict_slots = torch.empty((plan_slots,), dtype=torch.int32, device=self.device)
         self.src_indices = torch.empty((plan_slots,), dtype=torch.int32, device=self.device)
@@ -805,6 +835,8 @@ class OffloadMoeCache:
             # slot ids in place), so snapshot the routing histogram before that happens.
             ids = expert_ids.reshape(-1).long()
             self.decode_freq[layer_id].scatter_add_(0, ids, torch.ones_like(ids))
+        if self.hot_pinner is not None and layer_id == self._pin_refresh_layer():
+            self._refresh_pinned()
         self._pending_src_layer = layer_id
         self._pending_whole_layer = False
         ensure_experts(self, layer_id, expert_ids)
@@ -824,6 +856,8 @@ class OffloadMoeCache:
         if self.collect_decode_freq:
             ids = expert_ids.reshape(-1).long()
             self.decode_freq[layer_id].scatter_add_(0, ids, torch.ones_like(ids))
+        if self.hot_pinner is not None and layer_id == self._pin_refresh_layer():
+            self._refresh_pinned()
         self._pending_src_layer = layer_id
         self._pending_whole_layer = False
         ensure_experts_hybrid(
@@ -837,6 +871,42 @@ class OffloadMoeCache:
         self._pending_whole_layer = True
         materialize_layer(self, layer_id)
 
+    # ----- hot-expert pinning (--moe-pin-hot; policy in hot_pin.py) -----
+
+    def _pin_refresh_layer(self) -> int | None:
+        """The first GPU-decoded layer: its ensure call refreshes the pins, so the
+        refresh runs exactly once per decode forward (and is captured exactly once
+        per decode graph). Memoized against the cpu_layer_ids set identity."""
+        cached = self._pin_refresh_cache
+        if cached is None or cached[0] is not self.cpu_layer_ids:
+            first = next(
+                (l for l in range(self.num_layers) if l not in self.cpu_layer_ids), None
+            )
+            self._pin_refresh_cache = (self.cpu_layer_ids, first)
+        return self._pin_refresh_cache[1]
+
+    def _refresh_pinned(self) -> None:
+        # Bump pinned slots' usage to the current step so both ensure kernels'
+        # argmin(usage) eviction never selects them while a colder slot exists.
+        # Fixed-shape ops over persistent buffers only, so it is CUDA-graph safe:
+        # each replay re-reads _pin_mask's (host-swapped) content and the live step.
+        self.usage.copy_(torch.where(self._pin_mask, self.step, self.usage))
+
+    def tick_hot_pins(self) -> None:
+        """Host-side pin-policy tick; the engine calls this once per decode forward,
+        OUTSIDE graph capture. Every ``pin_sample_interval`` steps it reads the slot
+        bookkeeping back, rescores expert hotness, and swaps the new pin mask into
+        the persistent buffer the captured refresh op reads."""
+        if self.hot_pinner is None:
+            return
+        self._pin_tick += 1
+        if self._pin_tick % self.pin_sample_interval:
+            return
+        id_of_slot = self.id_of_slot.cpu()
+        usage = self.usage.cpu()
+        mask = self.hot_pinner.update(id_of_slot, usage, int(self.step.item()))
+        self._pin_mask.copy_(mask.to(self.device))
+
     def reset(self) -> None:
         from freetoken.moe.offload_kernels import reset_cache
 
@@ -844,6 +914,10 @@ class OffloadMoeCache:
         # Per-expert recency is not cache_size-shaped, so reset_cache leaves it alone; wipe
         # it here so a new sequence starts with cold hybrid fetch priorities.
         self.expert_recency.fill_(-1)
+        # Cold slots carry no hotness; drop the pins with them.
+        self._pin_mask.zero_()
+        if self.hot_pinner is not None:
+            self.hot_pinner.reset()
 
     def reset_stats(self) -> None:
         self.prefill_hit_rows = 0

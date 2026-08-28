@@ -39,6 +39,10 @@ class EngineConfig:
     # (cudaMemcpyBatchAsync); no-op unless moe_cache_size > 2 * num_experts.
     moe_prefill_hit_d2d: bool = False
     moe_collect_stats: bool = False  # capture decode miss-rate counters into the cuda graph
+    # Hot-expert pinning (--moe-pin-hot): protect up to this fraction of the offload MoE
+    # slot cache from LRU eviction, tracking persistently hot experts (see moe/hot_pin.py).
+    # 0 disables. Only meaningful for the offload/hybrid decode paths.
+    moe_pin_hot: float = 0.0
     # CPU MoE backend (--moe-backend cpu): number of CPU worker threads computing
     # the decode experts. 0 = auto (physical cores). Ignored by other backends.
     moe_cpu_threads: int = 0

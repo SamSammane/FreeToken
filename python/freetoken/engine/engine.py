@@ -613,6 +613,7 @@ class Engine:
                 quant_format=banks.quant_format,
                 decode_target=decode_target,
                 hybrid_max_fetch=config.moe_hybrid_max_fetch,
+                pin_hot_fraction=config.moe_pin_hot,
             )
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
             cache.cpu_layer_ids = cpu_layer_ids
@@ -914,6 +915,10 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
+        if batch.is_decode and self.moe_offload_cache is not None:
+            # Host-side hot-pin policy tick (no-op unless --moe-pin-hot): runs outside
+            # any graph capture; the captured refresh op reads the mask it maintains.
+            self.moe_offload_cache.tick_hot_pins()
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)

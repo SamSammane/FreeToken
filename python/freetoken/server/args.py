@@ -544,6 +544,26 @@ def parse_args(
         help="The unified MoE cache eviction policy.",
     )
 
+    def _parse_pin_fraction(value: str) -> float:
+        try:
+            frac = float(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a number in [0, 0.9]") from exc
+        if not 0 <= frac <= 0.9:
+            raise argparse.ArgumentTypeError("must be in [0, 0.9]")
+        return frac
+
+    parser.add_argument(
+        "--moe-pin-hot",
+        dest="moe_pin_hot",
+        type=_parse_pin_fraction,
+        default=ServerArgs.moe_pin_hot,
+        help=(
+            "Protect up to this fraction of the MoE slot cache from LRU eviction, "
+            "tracking persistently hot experts (offload/hybrid decode). 0 disables."
+        ),
+    )
+
     parser.add_argument(
         "--moe-cpu-threads",
         type=int,
