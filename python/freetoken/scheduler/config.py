@@ -18,6 +18,11 @@ class SchedulerConfig(EngineConfig):
     offline_mode: bool = False
     decode_log_interval: int = 40
     special_token_ckpt: bool = False
+    # After this many consecutive prefill batches scheduled while decode requests are
+    # waiting, run one decode batch before the next prefill (chunk). Bounds how long a
+    # long / queued chunked prefill can stall running decodes. 0 = strict prefill
+    # priority (the historical behavior).
+    decode_interleave: int = 0
 
     # networking config
     _unique_suffix: str = field(default_factory=_get_pid_suffix)

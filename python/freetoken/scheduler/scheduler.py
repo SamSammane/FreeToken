@@ -104,6 +104,8 @@ class Scheduler(SchedulerIOMixin):
         # terminal accounting acknowledgement has already been published.
         self._abort_tombstones: dict[int, None] = {}
         self._forward_iter = 0  # global forward counter; drives the SWA proactive-eviction cadence
+        # Consecutive prefill batches scheduled while decodes were waiting (--decode-interleave).
+        self._consecutive_prefills = 0
         # The launched-but-not-yet-drained batch (overlap): set at the top of each overlap_loop
         # iteration so the abort handler can tell whether a request's forward is still in flight
         # (mark it, defer the free to _process_last_data) or not (free immediately). Stays None
@@ -829,13 +831,31 @@ class Scheduler(SchedulerIOMixin):
             batch.mm_embeds = torch.cat(parts, dim=0)
 
     def _schedule_next_batch(self) -> ForwardInput | None:
-        # TODO: support other policies: e.g. DECODE first
-        batch = (
-            self.prefill_manager.schedule_next_batch(self.prefill_budget)
-            or self.decode_manager.schedule_next_batch()
-        )
+        # Prefill-priority, optionally bounded: with --decode-interleave N, once N
+        # consecutive prefill batches have been scheduled while decodes were waiting,
+        # the next batch is a decode batch. This caps how long a long chunked prefill
+        # (or a queue of prefills) can stall every running request's next token.
+        batch = None
+        interleave = self.config.decode_interleave
+        if (
+            interleave > 0
+            and self._consecutive_prefills >= interleave
+            and self.decode_manager.runnable
+        ):
+            batch = self.decode_manager.schedule_next_batch()
+        if batch is None:
+            batch = (
+                self.prefill_manager.schedule_next_batch(self.prefill_budget)
+                or self.decode_manager.schedule_next_batch()
+            )
         if batch is None:
             return None
+        # Count prefill debt only while decodes are actually waiting; any decode batch
+        # (interleaved or natural) clears it.
+        if batch.is_prefill and self.decode_manager.runnable:
+            self._consecutive_prefills += 1
+        else:
+            self._consecutive_prefills = 0
         forward_input = self._prepare_batch(batch)
         self._report_prompt_admissions(batch)
         return forward_input

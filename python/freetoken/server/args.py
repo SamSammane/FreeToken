@@ -336,6 +336,17 @@ def parse_args(
         help="Print one decode scheduler status line every N decode forwards.",
     )
 
+    parser.add_argument(
+        "--decode-interleave",
+        type=int,
+        default=ServerArgs.decode_interleave,
+        help=(
+            "Run one decode batch after every N consecutive prefill batches scheduled "
+            "while decodes are waiting, so a long chunked prefill cannot stall running "
+            "requests. 0 (default) keeps strict prefill priority; 1 alternates."
+        ),
+    )
+
     kv_capacity_group = parser.add_mutually_exclusive_group()
     kv_capacity_group.add_argument(
         "--num-pages",
