@@ -32,10 +32,11 @@ _SWA_RETAIN_GAP = 16
 class CacheManager:
     def __init__(self, num_pages: int, page_size: int, page_table: torch.Tensor, type: str,
                  linear_state_pool=None, swa_pool=None, sliding_window_size=None):
-        # The `_free_slots` follows a page-aligned manner. For example, if page_size = 2,
-        # the `_free_slots` may look like [0, 2, 4, 6, ...], and each slot represents a page.
+        # The free list follows a page-aligned manner. For example, if page_size = 2,
+        # it may look like [0, 2, 4, 6, ...], and each slot represents a page.
         device = page_table.device
-        self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * page_size
+        self.page_size = page_size
+        self._reset_free_list(num_pages, device)
         # Hybrid GDN models drive a second currency (GDN state snapshots in LinearStatePool)
         # through a HybridRadixCache; SWA models drive a second currency (swa-pool KV slots in
         # the HybridSWAKVCache global-paged mode) through a SWARadixCache; non-hybrid models keep
@@ -59,8 +60,39 @@ class CacheManager:
         self.device = device
         self.num_pages = num_pages
         self.page_table = page_table
-        self.page_size = page_size
         self.cache_type = type
+
+    def _reset_free_list(self, num_pages: int, device) -> None:
+        # Fixed-capacity LIFO free list: `_free_buf[:_free_count]` holds the free page
+        # starts. Frees write into the buffer in place and allocations slice off the top,
+        # so neither ever reallocates (the previous torch.cat-based list copied the whole
+        # tensor on every free/evict). Capacity num_pages is an invariant: a page is
+        # either free, tree-owned, or held by a request, so pushes cannot overflow.
+        self._free_buf = torch.arange(num_pages, dtype=torch.int32, device=device) * self.page_size
+        self._free_count = num_pages
+
+    @property
+    def free_slots(self) -> torch.Tensor:
+        """Free page starts, as a view of the live top of the free-list buffer."""
+        return self._free_buf[: self._free_count]
+
+    @free_slots.setter
+    def free_slots(self, value: torch.Tensor) -> None:
+        # Wholesale replacement (tests/tooling). Clone first: `value` may alias _free_buf
+        # (e.g. ``cm.free_slots = cm.free_slots[:3]``).
+        value = value.clone()
+        n = value.numel()
+        self._free_buf[:n] = value
+        self._free_count = n
+
+    def _push_free(self, pages: torch.Tensor) -> None:
+        m = pages.numel()
+        if m == 0:
+            return
+        end = self._free_count + m
+        assert end <= self._free_buf.numel(), "free-list overflow: freed more pages than exist"
+        self._free_buf[self._free_count : end] = pages
+        self._free_count = end
 
     # ----- capability hooks (defaults; plugged-in pools may narrow them) -----
     supports_runtime_rebuild = True
@@ -581,7 +613,7 @@ class CacheManager:
         self.device = device
         self.num_pages = num_pages
         self.page_table = page_table
-        self.free_slots = torch.arange(num_pages, dtype=torch.int32, device=device) * self.page_size
+        self._reset_free_list(num_pages, device)
         self.prefix_cache = self._make_prefix_cache(device, self.page_size, self.cache_type)
         # The discarded hybrid tree owned donated GDN-snapshot slots; rebuild is idle-only, so
         # reclaim the whole LinearStatePool free-list (else those slots leak -> admission hangs).
@@ -603,10 +635,11 @@ class CacheManager:
             yield
         finally:
             del self._free
-            self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
+            for pages in lazy_free_list:
+                self._push_free(pages)
 
     def _allocate(self, needed_pages: int) -> torch.Tensor:
-        if needed_pages > (free_pages := len(self.free_slots)):
+        if needed_pages > (free_pages := self._free_count):
             need = (needed_pages - free_pages) * self.page_size
             if self.is_swa:
                 # Evicting KV leaf nodes drops their swa slots too -> return both pools.
@@ -621,15 +654,18 @@ class CacheManager:
                     self.linear_state_pool.free(er.mamba_slots)
             else:
                 evicted = self.prefix_cache.evict(need)
-            self.free_slots = torch.cat([self.free_slots, evicted[:: self.page_size]])
-            assert len(self.free_slots) >= needed_pages, "Eviction did not free enough space."
-        allocated = self.free_slots[:needed_pages]
-        self.free_slots = self.free_slots[needed_pages:]
+            self._push_free(evicted[:: self.page_size])
+            assert self._free_count >= needed_pages, "Eviction did not free enough space."
+        # Clone: a later free writes the popped region of the buffer in place, so the
+        # caller must not hold a view into it.
+        start = self._free_count - needed_pages
+        allocated = self._free_buf[start : self._free_count].clone()
+        self._free_count = start
         return allocated
 
     def _free(self, indices: torch.Tensor) -> None:
         if len(indices) > 0:
-            self.free_slots = torch.cat([self.free_slots, indices[:: self.page_size]])
+            self._push_free(indices[:: self.page_size])
 
     def _page_to_token(self, pages: torch.Tensor) -> torch.Tensor:
         if self.page_size == 1:
