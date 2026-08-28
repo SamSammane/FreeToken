@@ -922,7 +922,7 @@ class Nvfp4LMHead(BaseOP):
         from freetoken.core import get_global_ctx
 
         batch = get_global_ctx().batch
-        if batch.is_prefill:
+        if batch.is_prefill and not batch.spec_verify:
             indices = batch.attn_metadata.get_last_indices(batch.size)
             x = x[indices].contiguous()
         if self._transposed:

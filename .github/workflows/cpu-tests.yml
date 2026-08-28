@@ -1,0 +1,43 @@
+# The PR gate the nightly-wheels workflow points at: the CPU-only portion of the test
+# suite (~1,150 tests) on a hosted runner. GPU-dependent tests self-skip when CUDA is
+# unavailable, so no self-hosted runner is needed here; the JIT CUDA kernels are never
+# built (the suite imports freetoken straight off python/ via PYTHONPATH).
+name: cpu-tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: cpu-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PYTHONPATH: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install CPU torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install dependencies
+        run: |
+          pip install pytest numpy fastapi pydantic uvicorn pyzmq transformers \
+            openai anthropic httpx psutil setproctitle msgpack safetensors \
+            huggingface_hub aiohttp rich typer prompt_toolkit partial-json-parser \
+            jinja2 pyyaml einops triton flashlib==0.3.0 \
+            apache-tvm-ffi==0.1.13.post3 flashinfer-python
+
+      - name: Run CPU test suite
+        run: pytest tests/ -m "not slow" -q

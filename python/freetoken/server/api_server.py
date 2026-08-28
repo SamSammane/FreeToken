@@ -16,6 +16,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from freetoken import __version__
+from freetoken.server.generation import maintenance_status
 from freetoken.core import SamplingParams
 from freetoken.message import (
     AbortMsg,
@@ -397,6 +398,33 @@ async def lifespan(_: FastAPI):
         _GLOBAL_STATE.shutdown()
 
 
+def install_api_key_auth(app: FastAPI, api_key: str | None) -> None:
+    """Require `Authorization: Bearer <key>` or `x-api-key: <key>` on every request when
+    an API key is configured (--api-key / FREETOKEN_API_KEY). No-op when unset -- the
+    default loopback bind needs none. Both header forms are accepted so OpenAI-style
+    (Bearer) and Anthropic-style (x-api-key) clients work unchanged; comparison is
+    constant-time. Must run before the app starts serving."""
+    if not api_key:
+        return
+    import hmac
+
+    def _presented(request: Request) -> str | None:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return request.headers.get("x-api-key")
+
+    @app.middleware("http")
+    async def _api_key_middleware(request: Request, call_next):
+        got = _presented(request)
+        if got is None or not hmac.compare_digest(got, api_key):
+            return JSONResponse(
+                {"error": "invalid or missing API key (Authorization: Bearer or x-api-key)"},
+                status_code=401,
+            )
+        return await call_next(request)
+
+
 def install_cors(app: FastAPI, origins_csv: str) -> None:
     """Attach CORS headers for browser/webview clients (e.g. the desktop app).
 
@@ -567,9 +595,20 @@ def _resolve_num_swa_pages(state: FrontendManager, req: CacheRebuildRequest) -> 
 
 
 @app.post("/v1/cache/rebuild")
-async def cache_rebuild(req: CacheRebuildRequest):
+async def cache_rebuild(req: CacheRebuildRequest, request: Request):
     """Trigger a runtime KV/MoE cache resize. Blocks until the scheduler reports a result
     (or timeout). New generation is gated (503) while a rebuild is in flight."""
+    from freetoken.server.accounting import _is_loopback
+
+    # Same posture as /v1/admin/prepare-stop: a rebuild reallocates VRAM pools and
+    # gates ALL generation for up to the rebuild timeout, so only local operators
+    # (the desktop, ft ctl) may trigger it -- never a remote API client.
+    client_host = request.client.host if request.client else None
+    if not _is_loopback(client_host):
+        return JSONResponse(
+            {"error": "cache rebuild is a local admin operation (loopback only)"},
+            status_code=403,
+        )
     state = get_global_state()
     if state.maintenance_state == "loading":
         return JSONResponse(
@@ -822,8 +861,8 @@ async def generate(req: GenerateRequest, request: Request):
     logger.debug("Received generate request %s", req)
     log_request("/generate", req, request)
     state = get_global_state()
-    if state.maintenance_state != "serving":
-        detail = "model is still loading" if state.maintenance_state == "loading" else "cache rebuild in progress"
+    _, detail = maintenance_status(state)
+    if detail is not None:
         return JSONResponse({"error": f"server unavailable: {detail}"}, status_code=503)
     if req.max_tokens < 1:
         return JSONResponse({"error": f"max_tokens must be at least 1, got {req.max_tokens}"}, status_code=400)
@@ -951,6 +990,12 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
     # Create/validate FREETOKEN_API_LOG_DIR and start the writer thread up front, so a
     # bad path is reported at boot rather than silently on the first request.
     install_cors(app, config.cors_origins)
+    install_api_key_auth(app, config.api_key)
+    if config.server_host not in ("127.0.0.1", "localhost", "::1") and not config.api_key:
+        logger.warning(
+            f"binding {config.server_host} with NO authentication: anyone who can reach "
+            "this address can use the engine. Set --api-key (or FREETOKEN_API_KEY)."
+        )
     init_request_logging()
     # Hide the frequent health/stats/requests/cache-status polling of the desktop app (and of
     # the shell's status bar) from uvicorn's access log; non-polling access lines are

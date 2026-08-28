@@ -129,7 +129,8 @@ class MoELayer(BaseOP):
                 fused_experts_fp8_block,
             )
 
-            if get_global_ctx().batch.is_prefill:
+            batch = get_global_ctx().batch
+            if batch.is_prefill and not batch.spec_verify:
                 return fused_experts_fp8_block(
                     hidden_states, self.gate_up_proj, self.gate_up_scale_inv,
                     self.down_proj, self.down_scale_inv,
@@ -225,7 +226,10 @@ class OffloadMoELayer(MoELayer):
         router_logits: torch.Tensor | None = None,
     ):
         ctx = get_global_ctx()
-        if ctx.batch.is_prefill:
+        # spec_verify batches are prefill-phase for attention but a handful of tokens for
+        # MoE: route them through the decode expert path (slot cache), never the prefill
+        # whole-layer streaming.
+        if ctx.batch.is_prefill and not ctx.batch.spec_verify:
             final_hidden_states = self.prefill_forward(hidden_states, router_logits)
         else:
             final_hidden_states = self.decode_forward(hidden_states, router_logits)
@@ -245,7 +249,7 @@ class OffloadMoELayer(MoELayer):
         rewrites expert ids into cache slot ids); pass a fresh tensor or a clone.
         """
         ctx = get_global_ctx()
-        if ctx.batch.is_prefill:
+        if ctx.batch.is_prefill and not ctx.batch.spec_verify:
             out = self._prefill_routed(hidden_states, topk_weights, topk_ids)
         else:
             out = self._decode_routed(hidden_states, topk_weights, topk_ids)

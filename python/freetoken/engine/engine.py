@@ -21,7 +21,7 @@ from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_fa
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory
 from .sample import BatchSamplingArgs, Sampler
-from freetoken.kvcache import create_kv_pool, resolve_pool_class
+from freetoken.kvcache import create_kv_pool, resolve_kv_cache_dtype, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
@@ -344,10 +344,13 @@ class Engine:
         # off it; the KV pool family owns every geometry-specific formula behind the rest.
         available_memory = _startup_kv_budget(config.memory_ratio, init_free_memory, new_free)
         available_memory -= state_pool_bytes(config)
+        # --kv-cache-dtype: validated before sizing so the halved fp8 bytes/token and
+        # the pool allocation can never disagree (kv_cache_itemsize keys on the config).
+        kv_dtype = resolve_kv_cache_dtype(config)
         self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
-            config, self.num_pages, device=self.device, dtype=self.dtype
+            config, self.num_pages, device=self.device, dtype=kv_dtype
         )
 
         # ======================= Linear (GatedDeltaNet) state initialization ========================
@@ -613,6 +616,7 @@ class Engine:
                 quant_format=banks.quant_format,
                 decode_target=decode_target,
                 hybrid_max_fetch=config.moe_hybrid_max_fetch,
+                pin_hot_fraction=config.moe_pin_hot,
             )
             # before set_bank_sources: the residency validation and the copy plan's skip of non-pinned layers key on the CPU-layer set
             cache.cpu_layer_ids = cpu_layer_ids
@@ -914,6 +918,10 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
+        if batch.is_decode and self.moe_offload_cache is not None:
+            # Host-side hot-pin policy tick (no-op unless --moe-pin-hot): runs outside
+            # any graph capture; the captured refresh op reads the mask it maintains.
+            self.moe_offload_cache.tick_hot_pins()
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
@@ -927,8 +935,14 @@ class Engine:
         for req in batch.reqs:
             req.complete_one()
 
-        batch_logits = logits[: batch.size]
-        next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
+        if batch.spec_verify:
+            # Verify round: the LM head kept every extend position, so ``logits`` has one
+            # row per verified position (sum of extend_len over reqs). Speculation is
+            # greedy-only; the scheduler's drain does the accept/rollback host-side.
+            next_tokens_gpu = logits.argmax(dim=-1).to(torch.int32)
+        else:
+            batch_logits = logits[: batch.size]
+            next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)

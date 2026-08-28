@@ -46,6 +46,7 @@ from .generation import (
     count_prompt_tokens,
     generate_events,
     generate_full,
+    maintenance_status,
     render_messages,
     resolve_sampling,
     split_tool_lists,
@@ -71,7 +72,9 @@ def _anthropic_stop(finish_reason: str | None, matched_stop: str | None) -> tupl
     with the matched string, otherwise the finish_reason is mapped normally."""
     if matched_stop is not None:
         return "stop_sequence", matched_stop
-    return STOP_REASON_MAP.get(finish_reason or "stop"), None
+    # Unknown finish reasons default to end_turn rather than emitting stop_reason: null,
+    # which Anthropic clients treat as "still streaming".
+    return STOP_REASON_MAP.get(finish_reason or "stop", "end_turn"), None
 
 
 def register_anthropic_routes(
@@ -83,10 +86,13 @@ def register_anthropic_routes(
     async def v1_messages(req: AnthropicMessagesRequest, request: Request):
         log_request("/v1/messages", req, request)
         state = get_state()
-        mstate = getattr(state, "maintenance_state", "serving")
-        if mstate != "serving":
-            detail = "model is still loading" if mstate == "loading" else "cache rebuild in progress"
-            return _anthropic_error_response(503, "overloaded_error", detail)
+        mstate, detail = maintenance_status(state)
+        if detail is not None:
+            # overloaded_error tells Anthropic SDK clients to retry -- right for the
+            # transient states, an infinite retry loop for "failed"/"stopping", which
+            # need a restart and must surface as a terminal api_error instead.
+            etype = "api_error" if mstate in ("failed", "stopping") else "overloaded_error"
+            return _anthropic_error_response(503, etype, detail)
         return await handle_anthropic_messages(req, request, state, get_model_sampling())
 
     @app.post("/v1/messages/count_tokens")

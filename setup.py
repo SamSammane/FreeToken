@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 from setuptools import setup
-from torch.utils.cpp_extension import BuildExtension, CUDA_HOME, CppExtension
+
+# FREETOKEN_SKIP_EXTENSIONS=1: install pure-Python only, no CUDA toolkit (or torch at
+# build time) required. For CPU-only checkouts -- lint, docs, the CPU test suite on a
+# hosted CI runner; serving still needs the extensions, and their import sites fail
+# loudly if used. Checked before the torch import so it works on a torch-less box too.
+if os.environ.get("FREETOKEN_SKIP_EXTENSIONS") == "1":
+    setup(ext_modules=[])
+    raise SystemExit(0)
+
+from torch.utils.cpp_extension import BuildExtension, CUDA_HOME, CppExtension  # noqa: E402
 
 
 ROOT = Path(__file__).parent

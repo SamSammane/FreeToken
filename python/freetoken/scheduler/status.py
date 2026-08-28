@@ -35,7 +35,10 @@ class SchedulerStatusReporter:
         mamba_slots: tuple[int, int] | None = None,
         swa_tokens: tuple[int, int] | None = None,
     ) -> None:
-        if batch.is_prefill:
+        # Speculative verify rounds are prefill-phase mechanically but decode-cadenced:
+        # one line per round would spam the log, so they report through the decode path
+        # (one status line every decode_log_interval rounds).
+        if batch.is_prefill and not batch.spec_verify:
             self._report_prefill(
                 batch,
                 running_reqs=running_reqs,
