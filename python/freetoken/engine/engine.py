@@ -21,7 +21,7 @@ from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_fa
 from .config import EngineConfig
 from .graph import GraphRunner, get_free_memory
 from .sample import BatchSamplingArgs, Sampler
-from freetoken.kvcache import create_kv_pool, resolve_pool_class
+from freetoken.kvcache import create_kv_pool, resolve_kv_cache_dtype, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
 from freetoken.kvcache.cache_status import _supports_swa_ratio
 from freetoken.kvcache.linear_state_pool import (
@@ -344,10 +344,13 @@ class Engine:
         # off it; the KV pool family owns every geometry-specific formula behind the rest.
         available_memory = _startup_kv_budget(config.memory_ratio, init_free_memory, new_free)
         available_memory -= state_pool_bytes(config)
+        # --kv-cache-dtype: validated before sizing so the halved fp8 bytes/token and
+        # the pool allocation can never disagree (kv_cache_itemsize keys on the config).
+        kv_dtype = resolve_kv_cache_dtype(config)
         self.num_pages = self._pool_cls.solve_num_pages(config, available_memory)
         num_tokens = self.num_pages * config.page_size
         self.ctx.kv_cache = self.kv_cache = create_kv_pool(
-            config, self.num_pages, device=self.device, dtype=self.dtype
+            config, self.num_pages, device=self.device, dtype=kv_dtype
         )
 
         # ======================= Linear (GatedDeltaNet) state initialization ========================

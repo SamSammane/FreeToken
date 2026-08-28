@@ -58,6 +58,10 @@ class EngineConfig:
     # misses so the PCIe fetch and the CPU compute finish together (perfect overlap);
     # falls back to a fixed cap of 1 without a usable `ft bench bw` profile.
     moe_hybrid_max_fetch: int = -1
+    # KV cache storage dtype (--kv-cache-dtype): "auto" = model dtype; "fp8_e4m3" halves
+    # KV bytes per token (static scale 1.0). Plain MHA/GQA models + the flashinfer
+    # attention backend only; validated at startup (kvcache.resolve_kv_cache_dtype).
+    kv_cache_dtype: str = "auto"
     cuda_graph_bs: List[int] | None = None
     cuda_graph_max_bs: int | None = None
     page_size: int = 1

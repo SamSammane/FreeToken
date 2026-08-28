@@ -366,6 +366,17 @@ def parse_args(
         ),
     )
 
+    parser.add_argument(
+        "--kv-cache-dtype",
+        choices=["auto", "fp8_e4m3"],
+        default=ServerArgs.kv_cache_dtype,
+        help=(
+            "KV cache storage dtype. fp8_e4m3 halves KV memory per token (static scale "
+            "1.0), buying more pages or expert cache; plain MHA/GQA models with the "
+            "flashinfer attention backend only."
+        ),
+    )
+
     kv_capacity_group = parser.add_mutually_exclusive_group()
     kv_capacity_group.add_argument(
         "--num-pages",

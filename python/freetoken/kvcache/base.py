@@ -16,6 +16,14 @@ class CacheRebuildRejected(Exception):
     this is recoverable, unlike a failure after the free."""
 
 
+def kv_cache_itemsize(config) -> int:
+    """Bytes per stored KV element: the model dtype, or 1 under --kv-cache-dtype
+    fp8_e4m3 (the engine validates the fp8 combination before any sizing runs)."""
+    if getattr(config, "kv_cache_dtype", "auto") == "fp8_e4m3":
+        return torch.float8_e4m3fn.itemsize
+    return config.dtype.itemsize
+
+
 def spec_kv_bytes_per_token(spec, config) -> int:
     """One paged-KV group's bytes per token: (1|2 slabs) x head_dim x local kv heads x dtype
     x layers, plus the bf16 DSA index-key slab when the spec carries indexer dims. Pure
@@ -26,7 +34,7 @@ def spec_kv_bytes_per_token(spec, config) -> int:
         (1 if spec.mla else 2)  # MLA latent groups store one slab (V aliases K)
         * spec.head_dim
         * div_even(spec.num_kv_heads, config.tp_info.size, allow_replicate=True)
-        * config.dtype.itemsize
+        * kv_cache_itemsize(config)
         * spec.num_layers
     )
     return per_token + spec.index_head_dim * spec.num_index_layers * 2
