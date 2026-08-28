@@ -16,6 +16,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from freetoken import __version__
+from freetoken.server.generation import maintenance_status
 from freetoken.core import SamplingParams
 from freetoken.message import (
     AbortMsg,
@@ -822,8 +823,8 @@ async def generate(req: GenerateRequest, request: Request):
     logger.debug("Received generate request %s", req)
     log_request("/generate", req, request)
     state = get_global_state()
-    if state.maintenance_state != "serving":
-        detail = "model is still loading" if state.maintenance_state == "loading" else "cache rebuild in progress"
+    _, detail = maintenance_status(state)
+    if detail is not None:
         return JSONResponse({"error": f"server unavailable: {detail}"}, status_code=503)
     if req.max_tokens < 1:
         return JSONResponse({"error": f"max_tokens must be at least 1, got {req.max_tokens}"}, status_code=400)

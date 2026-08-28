@@ -88,18 +88,14 @@ def _all_tool_dicts(tools) -> list[dict[str, Any]]:
 
 
 def _maintenance_gate(state: Any) -> JSONResponse | None:
-    """503 while the engine is not serving. Distinguishes the startup "loading" phase from a
-    runtime cache "rebuild"/"failed" so clients (and the desktop) get an actionable message.
-    None when serving."""
-    mstate = getattr(state, "maintenance_state", "serving")
-    if mstate == "serving":
+    """503 while the engine is not serving; None when serving. The state->detail table
+    lives in generation.maintenance_status, shared by every wire surface."""
+    from .generation import maintenance_status
+
+    mstate, detail = maintenance_status(state)
+    if detail is None:
         return None
-    if mstate == "loading":
-        msg = "model is still loading"
-    elif mstate == "failed":
-        msg = "server unavailable: maintenance failed (restart required)"
-    else:
-        msg = "server unavailable: cache rebuild in progress"
+    msg = detail if mstate == "loading" else f"server unavailable: {detail}"
     return JSONResponse({"error": msg}, status_code=503)
 
 
