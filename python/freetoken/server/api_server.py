@@ -568,9 +568,20 @@ def _resolve_num_swa_pages(state: FrontendManager, req: CacheRebuildRequest) -> 
 
 
 @app.post("/v1/cache/rebuild")
-async def cache_rebuild(req: CacheRebuildRequest):
+async def cache_rebuild(req: CacheRebuildRequest, request: Request):
     """Trigger a runtime KV/MoE cache resize. Blocks until the scheduler reports a result
     (or timeout). New generation is gated (503) while a rebuild is in flight."""
+    from freetoken.server.accounting import _is_loopback
+
+    # Same posture as /v1/admin/prepare-stop: a rebuild reallocates VRAM pools and
+    # gates ALL generation for up to the rebuild timeout, so only local operators
+    # (the desktop, ft ctl) may trigger it -- never a remote API client.
+    client_host = request.client.host if request.client else None
+    if not _is_loopback(client_host):
+        return JSONResponse(
+            {"error": "cache rebuild is a local admin operation (loopback only)"},
+            status_code=403,
+        )
     state = get_global_state()
     if state.maintenance_state == "loading":
         return JSONResponse(

@@ -101,12 +101,34 @@ def _start_oom_reaper(manager, interval: float, stop: threading.Event) -> thread
     return t
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True for binds that stay on this machine. Hostnames other than localhost are
+    conservatively treated as non-loopback (0.0.0.0/:: and public addresses must warn)."""
+    if host in ("localhost",):
+        return True
+    from ipaddress import ip_address
+
+    try:
+        return ip_address(host.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
 def main(argv: Sequence[str] | None = None, *, prog: str = "ft daemon") -> int:
     args = _build_parser(prog).parse_args(list(argv) if argv is not None else None)
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s [ft-daemon] %(levelname)s %(message)s",
     )
+    if not _is_loopback_host(args.host) and not args.token:
+        # The control plane can start/stop engines and run arbitrary-args benches;
+        # exposing it beyond loopback without a shared secret is never intended.
+        print(
+            f"{prog}: refusing to bind {args.host} without --token "
+            "(or FREETOKEN_DAEMON_TOKEN); the control plane would be open to the network",
+            file=sys.stderr,
+        )
+        return 1
 
     from .checkpoint import CheckpointManager
     from .logring import LogRing
