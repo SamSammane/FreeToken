@@ -15,6 +15,11 @@ from freetoken.utils import init_logger
 class ServerArgs(SchedulerConfig):
     server_host: str = "127.0.0.1"
     server_port: int = 1919
+    # Optional API key for the inference endpoints (--api-key / FREETOKEN_API_KEY).
+    # When set, every request must carry `Authorization: Bearer <key>` or
+    # `x-api-key: <key>`. None (default) serves unauthenticated -- fine on the
+    # default loopback bind; a non-loopback bind without it logs a loud warning.
+    api_key: str | None = None
     num_tokenizer: int = 0
     silent_output: bool = False
     # The terminal shell is attached to this server (ft shell --model / ft serve --shell-mode).
@@ -302,6 +307,15 @@ def parse_args(
         dest="server_port",
         default=ServerArgs.server_port,
         help="The port number for the server to listen on.",
+    )
+
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("FREETOKEN_API_KEY") or ServerArgs.api_key,
+        help=(
+            "Require this API key on every inference request (Authorization: Bearer or "
+            "x-api-key). Defaults to $FREETOKEN_API_KEY; unset serves unauthenticated."
+        ),
     )
 
     parser.add_argument(

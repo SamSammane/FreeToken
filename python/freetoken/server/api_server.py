@@ -398,6 +398,33 @@ async def lifespan(_: FastAPI):
         _GLOBAL_STATE.shutdown()
 
 
+def install_api_key_auth(app: FastAPI, api_key: str | None) -> None:
+    """Require `Authorization: Bearer <key>` or `x-api-key: <key>` on every request when
+    an API key is configured (--api-key / FREETOKEN_API_KEY). No-op when unset -- the
+    default loopback bind needs none. Both header forms are accepted so OpenAI-style
+    (Bearer) and Anthropic-style (x-api-key) clients work unchanged; comparison is
+    constant-time. Must run before the app starts serving."""
+    if not api_key:
+        return
+    import hmac
+
+    def _presented(request: Request) -> str | None:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return request.headers.get("x-api-key")
+
+    @app.middleware("http")
+    async def _api_key_middleware(request: Request, call_next):
+        got = _presented(request)
+        if got is None or not hmac.compare_digest(got, api_key):
+            return JSONResponse(
+                {"error": "invalid or missing API key (Authorization: Bearer or x-api-key)"},
+                status_code=401,
+            )
+        return await call_next(request)
+
+
 def install_cors(app: FastAPI, origins_csv: str) -> None:
     """Attach CORS headers for browser/webview clients (e.g. the desktop app).
 
@@ -963,6 +990,12 @@ def run_api_server(config: ServerArgs, start_backend: Callable[[], "Any"], run_s
     # Create/validate FREETOKEN_API_LOG_DIR and start the writer thread up front, so a
     # bad path is reported at boot rather than silently on the first request.
     install_cors(app, config.cors_origins)
+    install_api_key_auth(app, config.api_key)
+    if config.server_host not in ("127.0.0.1", "localhost", "::1") and not config.api_key:
+        logger.warning(
+            f"binding {config.server_host} with NO authentication: anyone who can reach "
+            "this address can use the engine. Set --api-key (or FREETOKEN_API_KEY)."
+        )
     init_request_logging()
     # Hide the frequent health/stats/requests/cache-status polling of the desktop app (and of
     # the shell's status bar) from uvicorn's access log; non-polling access lines are
