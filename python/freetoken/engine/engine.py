@@ -918,9 +918,11 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
-        if batch.is_decode and self.moe_offload_cache is not None:
+        if (batch.is_decode or batch.spec_verify) and self.moe_offload_cache is not None:
             # Host-side hot-pin policy tick (no-op unless --moe-pin-hot): runs outside
             # any graph capture; the captured refresh op reads the mask it maintains.
+            # spec_verify rounds ARE this workload's decode steps (prefill-phase only
+            # mechanically), so they must drive the sampling cadence too.
             self.moe_offload_cache.tick_hot_pins()
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):

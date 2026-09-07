@@ -40,4 +40,6 @@ jobs:
             apache-tvm-ffi==0.1.13.post3 flashinfer-python
 
       - name: Run CPU test suite
-        run: pytest tests/ -m "not slow" -q
+        # python -m pytest (not bare pytest): it puts the repo root on sys.path, which
+        # the cross-test `import tests.models...` helpers rely on.
+        run: python -m pytest tests/ -m "not slow" -q

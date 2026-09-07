@@ -37,8 +37,19 @@ class SchedulerStatusReporter:
     ) -> None:
         # Speculative verify rounds are prefill-phase mechanically but decode-cadenced:
         # one line per round would spam the log, so they report through the decode path
-        # (one status line every decode_log_interval rounds).
-        if batch.is_prefill and not batch.spec_verify:
+        # below (one status line every decode_log_interval rounds).
+        if batch.spec_verify:
+            self._report_decode(
+                batch,
+                running_reqs=running_reqs,
+                queue_reqs=queue_reqs,
+                kv_used_pages=kv_used_pages,
+                kv_total_pages=kv_total_pages,
+                page_size=page_size,
+                mamba_slots=mamba_slots,
+                swa_tokens=swa_tokens,
+            )
+        elif batch.is_prefill:
             self._report_prefill(
                 batch,
                 running_reqs=running_reqs,

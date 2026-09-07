@@ -886,11 +886,17 @@ class OffloadMoeCache:
         return self._pin_refresh_cache[1]
 
     def _refresh_pinned(self) -> None:
-        # Bump pinned slots' usage to the current step so both ensure kernels'
-        # argmin(usage) eviction never selects them while a colder slot exists.
-        # Fixed-shape ops over persistent buffers only, so it is CUDA-graph safe:
-        # each replay re-reads _pin_mask's (host-swapped) content and the live step.
-        self.usage.copy_(torch.where(self._pin_mask, self.step, self.usage))
+        # Bump pinned slots' usage past EVERY stamp this forward can produce: the
+        # refresh runs once (first GPU layer), but each of the num_layers ensure
+        # kernels increments step and stamps hits/victims with the new value, so a
+        # plain `= step` would leave pinned slots the oldest entries by the later
+        # layers of a heavy-miss forward -- argmin(usage) would evict them exactly
+        # in the storm pinning exists for. step monotonically grows, so the lead
+        # stays ordered across forwards. Fixed-shape ops over persistent buffers
+        # only, so it is CUDA-graph safe: each replay re-reads _pin_mask's
+        # (host-swapped) content and the live step.
+        lead = self.step + (self.num_layers + 1)
+        self.usage.copy_(torch.where(self._pin_mask, lead, self.usage))
 
     def tick_hot_pins(self) -> None:
         """Host-side pin-policy tick; the engine calls this once per decode forward,

@@ -101,6 +101,31 @@ def test_pinned_expert_survives_an_eviction_storm():
     assert int(cache.id_of_slot[hot_slot]) == 0 * E + 0
 
 
+def test_pin_lead_survives_a_single_forward_multi_expert_storm():
+    """The refresh runs ONCE per forward (first GPU layer) but every layer's ensure
+    increments step and stamps newer values; a plain `usage[pinned] = step` left pinned
+    slots the oldest entries by the later layers of a heavy-miss forward. The lead
+    (step + num_layers + 1) must outlast every stamp the forward can produce."""
+    cache = _mk_cache(pin_fraction=0.35)
+    for _ in range(3):
+        _ensure(cache, 0, [0])
+    for _ in range(2):
+        cache._pin_tick = cache.pin_sample_interval - 1
+        cache.tick_hot_pins()
+    hot_slot = _slot_of(cache, 0, 0)
+    assert hot_slot >= 0 and bool(cache._pin_mask[hot_slot])
+
+    # ONE forward: the layer-0 ensure refreshes the pins, then layer 1 routes a full
+    # multi-expert batch -- enough distinct flat ids that every non-pinned slot is
+    # (re)stamped newer and evictions must pick victims among them.
+    _ensure(cache, 0, [1])                 # refresh happens here
+    _ensure(cache, 1, [0, 1, 2, 3])        # heavy layer: 4 flat ids, evictions required
+    assert _slot_of(cache, 0, 0) == hot_slot, "pinned expert evicted mid-forward"
+    assert int(cache.id_of_slot[hot_slot]) == 0
+    # The lead is still ahead of the forward's final step, so it protected throughout.
+    assert int(cache.usage[hot_slot]) > int(cache.step)
+
+
 def test_unpinned_baseline_gets_evicted_by_the_same_storm():
     cache = _mk_cache(pin_fraction=0.0)
     assert cache.hot_pinner is None

@@ -35,6 +35,25 @@ def _decode_batch(n):
     return SimpleNamespace(is_prefill=False, is_decode=True, spec_verify=False, reqs=[_req(1, 0) for _ in range(n)])
 
 
+def _spec_batch(n):
+    # A speculative verify round: prefill-phase mechanically, decode-cadenced.
+    return SimpleNamespace(is_prefill=True, is_decode=False, spec_verify=True,
+                           reqs=[_req(2, 0) for _ in range(n)])
+
+
+def test_spec_verify_batches_report_through_the_decode_path():
+    # Regression: spec batches fell through BOTH branches (is_prefill excluded them from
+    # the prefill line, is_decode was False) and status lines vanished entirely while
+    # speculation was active.
+    rep, logs, clock = _reporter(interval=1)
+    clock["t"] = 1.0
+    rep.report_batch(_spec_batch(2), running_reqs=2, queue_reqs=0,
+                     kv_used_pages=10, kv_total_pages=100, page_size=1)
+    assert len(logs) == 1
+    assert "#running-req: 2" in logs[0]  # the decode-style line, not the prefill one
+    assert "#new-seq" not in logs[0]
+
+
 def test_prefill_line_reports_tokens_and_throughput():
     rep, logs, clock = _reporter()
     clock["t"] = 0.5  # 30 new tokens over 0.5s -> 60 tok/s
