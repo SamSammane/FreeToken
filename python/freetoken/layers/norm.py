@@ -7,9 +7,9 @@ from .base import BaseOP
 
 class RMSNorm(BaseOP):
     def __init__(self, size: int, eps: float) -> None:
-        from freetoken.kernel.backend import is_flashinfer_installed
+        from freetoken.kernel.backend import use_flashinfer_kernels
 
-        if is_flashinfer_installed():
+        if use_flashinfer_kernels():
             from flashinfer import rmsnorm
         else:
             from freetoken.kernel.triton.norm import rmsnorm
@@ -91,9 +91,9 @@ class GemmaPlusOneRMSNorm(BaseOP):
     """
 
     def __init__(self, size: int, eps: float) -> None:
-        from freetoken.kernel.backend import is_flashinfer_installed
+        from freetoken.kernel.backend import use_flashinfer_kernels
 
-        if is_flashinfer_installed():
+        if use_flashinfer_kernels():
             from flashinfer.norm import gemma_rmsnorm
         else:
             from freetoken.kernel.triton.norm import gemma_rmsnorm
@@ -123,9 +123,9 @@ class GemmaPlusOneRMSNormFused(BaseOP):
     layernorm seam: ``forward(x, residual)`` returns ``(normed, residual)``."""
 
     def __init__(self, size: int, eps: float) -> None:
-        from freetoken.kernel.backend import is_flashinfer_installed
+        from freetoken.kernel.backend import use_flashinfer_kernels
 
-        if is_flashinfer_installed():
+        if use_flashinfer_kernels():
             from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
         else:
             from freetoken.kernel.triton.norm import (
@@ -149,9 +149,9 @@ class GemmaPlusOneRMSNormFused(BaseOP):
 
 class RMSNormFused(BaseOP):
     def __init__(self, size: int, eps: float) -> None:
-        from freetoken.kernel.backend import is_flashinfer_installed
+        from freetoken.kernel.backend import use_flashinfer_kernels
 
-        if is_flashinfer_installed():
+        if use_flashinfer_kernels():
             from flashinfer import fused_add_rmsnorm, rmsnorm
         else:
             from freetoken.kernel.triton.norm import fused_add_rmsnorm, rmsnorm

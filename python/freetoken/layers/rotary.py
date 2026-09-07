@@ -59,12 +59,11 @@ class RotaryEmbedding(StateLessOP):
         self._cos_sin_cache = torch.cat((cos, sin), dim=-1)
         assert self.head_size in [64, 128, 256, 512]
 
-        from freetoken.kernel.backend import is_flashinfer_installed
+        from freetoken.kernel.backend import use_flashinfer_kernels
 
-        # Gate on CUDA, not just installation: recent flashinfer queries
-        # torch.cuda.get_device_properties at IMPORT time, which raises on a CPU-only
-        # torch (CPU test runs, CI) even though the package imports fine elsewhere.
-        if is_flashinfer_installed() and torch.cuda.is_available():
+        # Gated on CUDA, not just installation: recent flashinfer queries device
+        # properties at IMPORT time and raises on CPU-only torch (see backend.py).
+        if use_flashinfer_kernels():
             from flashinfer import apply_rope_with_cos_sin_cache_inplace
         else:
             from freetoken.kernel.triton.rope import apply_rope_with_cos_sin_cache_inplace
