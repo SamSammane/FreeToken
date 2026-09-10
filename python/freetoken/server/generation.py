@@ -255,6 +255,27 @@ def split_tool_lists(
     return template, all_tool_dicts
 
 
+def maintenance_status(state: Any) -> tuple[str, str | None]:
+    """(maintenance_state, human detail) for the 503 gates every adapter fronts with.
+
+    Detail is None while serving. One table for all four wire surfaces so a state can
+    never be misreported by one of them: in particular "failed" must say
+    restart-required — mapping it to "rebuild in progress" (the old per-adapter copies)
+    told retrying clients to wait forever for an engine that cannot recover — and
+    "stopping" is a shutdown, not a rebuild.
+    """
+    mstate = getattr(state, "maintenance_state", "serving")
+    if mstate == "serving":
+        return mstate, None
+    if mstate == "loading":
+        return mstate, "model is still loading"
+    if mstate == "failed":
+        return mstate, "maintenance failed (restart required)"
+    if mstate == "stopping":
+        return mstate, "server is stopping"
+    return mstate, "cache rebuild in progress"
+
+
 # --------------------------------------------------------------------------- #
 # The primitive: submit + generate (consume a GenSpec, drive the engine waist).
 # --------------------------------------------------------------------------- #

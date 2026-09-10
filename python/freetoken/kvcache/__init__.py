@@ -66,6 +66,40 @@ def resolve_pool_class(model_config: ModelConfig) -> type[BaseKVCachePool]:
     return MHAKVCache
 
 
+def resolve_kv_cache_dtype(config) -> torch.dtype:
+    """The dtype the paged KV pool stores (--kv-cache-dtype).
+
+    "auto" is the model dtype. "fp8_e4m3" halves KV bytes per token (scale 1.0,
+    saturating cast at store time), which the engine trades directly into more pages
+    or a bigger expert cache -- validated here to the supported combination: a plain
+    MHA/GQA pool (no SWA / MLA / DSA / BSA / DSV4 tiers, no linear-attention hybrid)
+    and the flashinfer attention backend (the only one wired for fp8 KV reads).
+    Raises ValueError at startup for anything else, with the old cache intact.
+    """
+    import torch
+
+    choice = getattr(config, "kv_cache_dtype", "auto")
+    if choice == "auto":
+        return config.dtype
+    if choice != "fp8_e4m3":
+        raise ValueError(f"unknown --kv-cache-dtype {choice!r} (auto|fp8_e4m3)")
+    from .mha_pool import MHAKVCache
+
+    mc = config.model_config
+    if resolve_pool_class(mc) is not MHAKVCache or getattr(mc, "has_linear_attention", False):
+        raise ValueError(
+            "--kv-cache-dtype fp8_e4m3 supports plain MHA/GQA models only "
+            "(no SWA / MLA / DSA / block-sparse / DSV4 pools, no linear-attention hybrids)"
+        )
+    parts = {p.strip() for p in config.attention_backend.split(",")}
+    if parts != {"fi"}:
+        raise ValueError(
+            "--kv-cache-dtype fp8_e4m3 requires the flashinfer attention backend "
+            f"(--attention-backend fi); resolved backend is {config.attention_backend!r}"
+        )
+    return torch.float8_e4m3fn
+
+
 def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dtype):
     """Build the engine's KV pool for ``num_pages`` USABLE pages (the dummy page and every
     secondary tier -- window pool, index slab, state rings -- are derived here or inside
@@ -106,6 +140,8 @@ def create_kv_pool(config, num_pages: int, device: torch.device, dtype: torch.dt
         num_swa_tokens=num_swa_tokens,
         device=device,
         dtype=dtype,
+        # None (duck-typed test configs without .dtype) -> pool defaults to `dtype`.
+        compute_dtype=getattr(config, "dtype", None),
     )
 
 
@@ -116,6 +152,7 @@ def create_kvcache_pool(
     dtype: torch.dtype,
     device: torch.device,
     num_swa_tokens: int | None = None,
+    compute_dtype: torch.dtype | None = None,
 ) -> BaseKVCachePool:
     if model_config.has_swa_attention:
         from .hybrid_swa_pool import HybridSWAKVCache
@@ -207,6 +244,7 @@ def create_kvcache_pool(
         device=device,
         dtype=dtype,
         layer_ids=layer_ids,
+        compute_dtype=compute_dtype,
     )
 
 

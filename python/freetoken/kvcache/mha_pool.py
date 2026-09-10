@@ -32,7 +32,12 @@ class MHAKVCache(BaseKVCachePool):
         dtype: torch.dtype,
         device: torch.device,
         layer_ids: Sequence[int] | None = None,
+        compute_dtype: torch.dtype | None = None,
     ) -> None:
+        # The dtype attention math runs in (q and the model activations). Differs from
+        # the storage ``dtype`` only under --kv-cache-dtype fp8_e4m3, where store_kv
+        # casts on the way in and the backend plans q/kv dtypes separately.
+        self.compute_dtype = compute_dtype or dtype
         tp_info = get_tp_info()
         local_kv_heads = div_even(num_kv_heads, tp_info.size, allow_replicate=True)
         self._num_layers = num_layers
@@ -126,6 +131,11 @@ class MHAKVCache(BaseKVCachePool):
     ) -> None:
         from freetoken.kernel import store_cache
 
+        if k.dtype != self._kv_buffer.dtype:
+            # fp8 KV storage: saturating cast on the way in (static scale 1.0); the
+            # store kernel itself is a raw byte copy, so dtypes must match here.
+            k = k.to(self._kv_buffer.dtype)
+            v = v.to(self._kv_buffer.dtype)
         dense = self._dense(layer_id)
         store_cache(
             k_cache=self._k_buffer[dense].view(self._storage_shape),

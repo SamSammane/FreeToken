@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import functools
+import hmac
 import json
 import os
 import sys
@@ -146,7 +147,11 @@ def build_app(
                 pass
 
     def require_token(x_ft_token: str | None = Header(default=None)) -> None:
-        if token is not None and x_ft_token != token:
+        # compare_digest: a plain != leaks the match length through timing on a
+        # network-reachable control plane.
+        if token is not None and not (
+            x_ft_token is not None and hmac.compare_digest(x_ft_token, token)
+        ):
             raise HTTPException(status_code=401, detail="invalid or missing X-FT-Token")
 
     auth = [Depends(require_token)]

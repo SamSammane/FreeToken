@@ -88,15 +88,19 @@ def test_lazy_free_snapshots_the_rows_it_was_handed():
     """The deferred free list must not be rewritten by a later re-point of the same row."""
     page_table = torch.zeros(2, 8, dtype=torch.int32)
     cm = CacheManager(8, 1, page_table, "radix")
-    page_table[0, :4] = torch.tensor([4, 5, 6, 7], dtype=torch.int32)
-    before = cm.free_slots.clone()
+    # Really allocate the row's pages: the fixed-capacity free list asserts conservation,
+    # so a fabricated row of never-allocated pages would overflow it on free.
+    row = cm._allocate(4)
+    page_table[0, :4] = row
+    freed_pages = sorted(row.tolist())
+    before = len(cm.free_slots)
 
     with cm.lazy_free_region():
         cm._free(page_table[0, :4])
         page_table[0, :4] = torch.tensor([0, 1, 2, 3], dtype=torch.int32)  # a re-point
 
-    appended = cm.free_slots[len(before):].tolist()
-    assert appended == [4, 5, 6, 7]
+    appended = cm.free_slots[before:].tolist()
+    assert sorted(appended) == freed_pages
 
 
 def test_radix_subspan_commit_repoints_only_the_deduped_slice():

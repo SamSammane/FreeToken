@@ -26,6 +26,18 @@ def is_flashinfer_installed() -> bool:
     return _importable("flashinfer")
 
 
+def use_flashinfer_kernels() -> bool:
+    """Gate for kernel-selection sites that actually IMPORT flashinfer (norm, rope,
+    activation, sampling): installed AND CUDA usable. Recent flashinfer queries device
+    properties at import time and raises on CPU-only torch, so on a GPU-less box the
+    triton/torch fallbacks must win even when the package is present. Capability
+    probing (backend auto-selection) keeps using is_flashinfer_installed -- it never
+    imports the package. Not cached: torch.cuda.is_available() is."""
+    import torch
+
+    return is_flashinfer_installed() and torch.cuda.is_available()
+
+
 @functools.cache
 def is_sgl_kernel_installed() -> bool:
     return _importable("sgl_kernel")

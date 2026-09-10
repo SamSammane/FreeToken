@@ -15,6 +15,11 @@ from freetoken.utils import init_logger
 class ServerArgs(SchedulerConfig):
     server_host: str = "127.0.0.1"
     server_port: int = 1919
+    # Optional API key for the inference endpoints (--api-key / FREETOKEN_API_KEY).
+    # When set, every request must carry `Authorization: Bearer <key>` or
+    # `x-api-key: <key>`. None (default) serves unauthenticated -- fine on the
+    # default loopback bind; a non-loopback bind without it logs a loud warning.
+    api_key: str | None = None
     num_tokenizer: int = 0
     silent_output: bool = False
     # The terminal shell is attached to this server (ft shell --model / ft serve --shell-mode).
@@ -305,6 +310,15 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--api-key",
+        default=os.environ.get("FREETOKEN_API_KEY") or ServerArgs.api_key,
+        help=(
+            "Require this API key on every inference request (Authorization: Bearer or "
+            "x-api-key). Defaults to $FREETOKEN_API_KEY; unset serves unauthenticated."
+        ),
+    )
+
+    parser.add_argument(
         "--cuda-graph-max-bs",
         "--graph",
         type=int,
@@ -334,6 +348,47 @@ def parse_args(
         type=_positive_int,
         default=ServerArgs.decode_log_interval,
         help="Print one decode scheduler status line every N decode forwards.",
+    )
+
+    parser.add_argument(
+        "--speculative",
+        choices=["none", "ngram"],
+        default=ServerArgs.speculative,
+        help=(
+            "Speculative decoding. 'ngram' drafts by prompt lookup over each request's "
+            "own context and verifies with one extend forward per round (greedy "
+            "requests, plain radix/naive caches; output is bit-identical to plain "
+            "greedy decoding). Implies non-overlap scheduling."
+        ),
+    )
+
+    parser.add_argument(
+        "--speculative-tokens",
+        type=_positive_int,
+        default=ServerArgs.speculative_tokens,
+        help="Max draft tokens per request per verify round for --speculative ngram.",
+    )
+
+    parser.add_argument(
+        "--decode-interleave",
+        type=int,
+        default=ServerArgs.decode_interleave,
+        help=(
+            "Run one decode batch after every N consecutive prefill batches scheduled "
+            "while decodes are waiting, so a long chunked prefill cannot stall running "
+            "requests. 0 (default) keeps strict prefill priority; 1 alternates."
+        ),
+    )
+
+    parser.add_argument(
+        "--kv-cache-dtype",
+        choices=["auto", "fp8_e4m3"],
+        default=ServerArgs.kv_cache_dtype,
+        help=(
+            "KV cache storage dtype. fp8_e4m3 halves KV memory per token (static scale "
+            "1.0), buying more pages or expert cache; plain MHA/GQA models with the "
+            "flashinfer attention backend only."
+        ),
     )
 
     kv_capacity_group = parser.add_mutually_exclusive_group()
@@ -531,6 +586,26 @@ def parse_args(
         default=ServerArgs.moe_cache_policy,
         choices=["lru"],
         help="The unified MoE cache eviction policy.",
+    )
+
+    def _parse_pin_fraction(value: str) -> float:
+        try:
+            frac = float(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be a number in [0, 0.9]") from exc
+        if not 0 <= frac <= 0.9:
+            raise argparse.ArgumentTypeError("must be in [0, 0.9]")
+        return frac
+
+    parser.add_argument(
+        "--moe-pin-hot",
+        dest="moe_pin_hot",
+        type=_parse_pin_fraction,
+        default=ServerArgs.moe_pin_hot,
+        help=(
+            "Protect up to this fraction of the MoE slot cache from LRU eviction, "
+            "tracking persistently hot experts (offload/hybrid decode). 0 disables."
+        ),
     )
 
     parser.add_argument(

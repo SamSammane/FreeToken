@@ -26,6 +26,15 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from freetoken.server.api_server import FrontendManager, dispatch_rebuild
+
+
+def _loopback_request():
+    """cache_rebuild is loopback-guarded; these tests exercise the state machine, so
+    they call it as a local admin would."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
 from freetoken.server.supervisor import (
     BackendHandle,
     LoadProgress,
@@ -251,10 +260,16 @@ def test_cache_rebuild_guarded_during_loading():
         last_rebuild=None,
     )
     try:
-        client = TestClient(api.app)
+        client = TestClient(api.app, client=("127.0.0.1", 50000))  # pass the loopback guard
         r = client.post("/v1/cache/rebuild", json={})
         assert r.status_code == 503
         assert "loading" in r.json().get("error", "").lower()
+        # A remote caller must be refused before any state is read: rebuild reallocates
+        # VRAM pools and gates all generation, so it is loopback-only.
+        remote = TestClient(api.app, client=("10.1.2.3", 50000))
+        r = remote.post("/v1/cache/rebuild", json={})
+        assert r.status_code == 403
+        assert "loopback" in r.json().get("error", "")
     finally:
         api._GLOBAL_STATE = prev
 
@@ -279,7 +294,7 @@ def test_cache_rebuild_timeout_keeps_gate_closed():
     api_server._GLOBAL_STATE = state
     try:
         resp = asyncio.run(
-            cache_rebuild(CacheRebuildRequest(moe_cache_size=8, timeout=0.05))
+            cache_rebuild(CacheRebuildRequest(moe_cache_size=8, timeout=0.05), _loopback_request())
         )  # future never resolves -> times out
     finally:
         api_server._GLOBAL_STATE = None
@@ -307,7 +322,7 @@ def test_cache_rebuild_send_failure_rolls_back_gate():
     )
     api_server._GLOBAL_STATE = state
     try:
-        resp = asyncio.run(cache_rebuild(CacheRebuildRequest(moe_cache_size=8, timeout=5.0)))
+        resp = asyncio.run(cache_rebuild(CacheRebuildRequest(moe_cache_size=8, timeout=5.0), _loopback_request()))
     finally:
         api_server._GLOBAL_STATE = None
 

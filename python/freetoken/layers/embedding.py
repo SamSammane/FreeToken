@@ -104,7 +104,9 @@ class ParallelLMHead(VocabParallelEmbedding):
         ctx = get_global_ctx()
         batch = ctx.batch
         bs = batch.size
-        if batch.is_prefill:
+        if batch.is_prefill and not batch.spec_verify:
+            # spec_verify keeps every extend position: the engine verifies draft tokens
+            # against the argmax at each position (see core.Batch.spec_verify).
             indices = batch.attn_metadata.get_last_indices(bs)
             x = x[indices].contiguous()
             del indices
@@ -116,7 +118,10 @@ class ParallelLMHead(VocabParallelEmbedding):
         input_shape = logits.shape
         output_tensor = self._comm.all_gather(logits)
 
-        if bs == 1:
+        # Key the singleton shortcut on the actual ROW count, not batch.size: a
+        # spec_verify round keeps every extend position, so one request can carry
+        # len(draft) + 1 rows that the flat view would mangle.
+        if input_shape[0] == 1:
             return output_tensor.view(1, -1)[:, : self.num_embeddings]
 
         output_tensor = output_tensor.view((self.tp_size,) + input_shape)

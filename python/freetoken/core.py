@@ -146,6 +146,15 @@ class Batch:
     # _prepare_batch succeeds. Continuation chunks leave this empty, so accounting is
     # exactly-once.
     prompt_admissions: List[Tuple[int, int, int]] = field(default_factory=list, init=False)
+    # Speculative verify round (--speculative ngram): phase is "prefill" (multi-token
+    # extend through the chunked-prefill machinery) but the LM head keeps EVERY extend
+    # position (no last-index gather), the engine takes per-position argmax instead of
+    # sampling, and the offload MoE layers route through their DECODE expert path (a
+    # verify batch is a handful of tokens; the prefill whole-layer streaming would be
+    # pathological). Set by the scheduler's _try_speculate.
+    spec_verify: bool = field(default=False, init=False)
+    # Per-request draft token lists, aligned with reqs; set with spec_verify.
+    spec_drafts: "List[List[int]] | None" = field(default=None, init=False)
 
     @property
     def is_prefill(self) -> bool:
